@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Gerador de Planejamento · Serafina</title>
+<meta name="viewport" content="width=1440, initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+// Suppress benign ResizeObserver loop warning (Chrome quirk)
+const _consoleError = console.error;
+console.error = function(...args) {
+  const s = args[0] && args[0].toString ? args[0].toString() : "";
+  if (s.includes("ResizeObserver loop")) return;
+  _consoleError.apply(console, args);
+};
+window.addEventListener("error", function(e) {
+  if (e.message && e.message.includes("ResizeObserver loop")) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    return false;
+  }
+}, true);
+// Wrap ResizeObserver to debounce callbacks via rAF
+if (window.ResizeObserver) {
+  const RO = window.ResizeObserver;
+  window.ResizeObserver = class extends RO {
+    constructor(cb) {
+      super((entries, observer) => {
+        window.requestAnimationFrame(() => {
+          try { cb(entries, observer); } catch(e) {
+            if (!String(e).includes("ResizeObserver loop")) throw e;
+          }
+        });
+      });
+    }
+  };
+}
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="App.jsx"></script>
+
+</body>
+</html>
