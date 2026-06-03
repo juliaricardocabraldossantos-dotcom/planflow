@@ -16,8 +16,17 @@ App web client-side (React 18) para montar planejamentos de conteúdo: upload do
 ```
 
 `App.jsx` é a concatenação, **na ordem correta de carregamento**, dos módulos originais:
-`store → canvas → panel-plans → panel-upload → panel-design → panel-editor → panel-preview → export-posts → main`.
+`store → supabase-sync → auth → canvas → panel-plans → panel-upload → panel-design → panel-editor → panel-preview → export-posts → panel-auth → main`.
 Todos compartilham escopo global (`window`), por isso a ordem importa.
+
+## Acesso (login unificado)
+
+O app é protegido por um **login único da equipe** (sem cadastro, sem banco):
+
+- Usuário: `serafina`
+- Senha: `serafina2024`
+
+A sessão fica no `localStorage` e expira após 8 horas. Para trocar as credenciais, edite o objeto `CREDENCIAIS` na seção `auth.jsx` dentro do `App.jsx`.
 
 ## Rodar localmente
 
@@ -70,3 +79,31 @@ O setup atual prioriza simplicidade. Para um app mais rápido em produção, con
 4. No Vercel, use Build Command `npm run build` e Output Directory `dist`.
 
 Isso remove o Babel do navegador e gera um bundle minificado.
+
+## Supabase (persistência na nuvem)
+
+A ferramenta sincroniza **clientes, planejamentos, posts e design system** com o Supabase, além de manter o estado local (funciona offline e faz fallback para `localStorage`).
+
+- Credenciais e mapeamento de tabelas ficam em `App.jsx` (seção `supabase-sync.jsx`).
+- O cliente JS do Supabase é carregado via CDN no `index.html`.
+- O badge **"Nuvem"** no topo mostra o status (`Salvando…` / `Salvo` / `Erro`) e lista os clientes salvos na nuvem — clicar em um cliente carrega posts + design dele.
+
+### ⚠️ Bucket de imagens (passo manual obrigatório)
+
+As imagens dos posts são enviadas para o **Supabase Storage**, bucket `planflow-imagens`. A chave *publishable* **não tem permissão para criar buckets nem políticas**, então faça isso uma vez no painel:
+
+1. Supabase → **Storage** → **New bucket**.
+2. Nome exato: `planflow-imagens` · marque **Public bucket** · **Save**.
+3. Em **SQL Editor**, crie as políticas de upload para o papel `anon` (o app usa a chave pública, sem login de usuário no Supabase):
+
+```sql
+create policy "anon upload planflow"
+  on storage.objects for insert to anon
+  with check ( bucket_id = 'planflow-imagens' );
+
+create policy "anon update planflow"
+  on storage.objects for update to anon
+  using ( bucket_id = 'planflow-imagens' );
+```
+
+Enquanto o bucket não existir, os posts ainda salvam normalmente (texto + layout + design system) — apenas as imagens não são enviadas, e o badge avisa.
