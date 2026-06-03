@@ -119,6 +119,7 @@ const DEFAULT_DESIGN = /*EDITMODE-BEGIN*/{
   "titleWeight": 700,
   "contentPosition": "bottom-left",
   "contentPadding": 36,
+  "contentOffsetY": 0,
   "contentMaxWidth": 100,
   "titleSubtitleGap": 14,
   "titleLineHeight": 1.0,
@@ -147,6 +148,7 @@ const DEFAULT_DESIGN = /*EDITMODE-BEGIN*/{
   "textBoxRadius": 0,
   "textBoxMode": "block",
   "textBoxSubtitle": true,
+  "textBoxLineGap": 10,
   "brandElements": [],
   "elementUrl": null,
   "elementPosition": "bottom-right",
@@ -528,20 +530,31 @@ function useAppStore() {
     setHiddenPalettes(hiddenPalettes.filter(n => n !== name));
   }, [hiddenPalettes, setHiddenPalettes]);
 
-  // Layout presets — save a post's overrides as a reusable preset
-  const [layoutPresets, setLayoutPresets] = usePersistedState("serafina-layouts", []);
-  const saveLayoutPreset = useCallback((name, overrides) => {
-    const id = `layout-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
-    const preset = { id, name: name.trim(), overrides: { ...(overrides || {}) }, savedAt: new Date().toISOString() };
-    setLayoutPresets([...layoutPresets, preset]);
-    return preset;
-  }, [layoutPresets, setLayoutPresets]);
-  const removeLayoutPreset = useCallback((id) => {
-    setLayoutPresets(layoutPresets.filter(p => p.id !== id));
-  }, [layoutPresets, setLayoutPresets]);
-  const renameLayoutPreset = useCallback((id, name) => {
-    setLayoutPresets(layoutPresets.map(p => p.id === id ? { ...p, name } : p));
-  }, [layoutPresets, setLayoutPresets]);
+  // Layout presets — saved per CLIENT so each client's design system keeps
+  // its own layouts (no cross-client repetition). Stored as a map
+  // { [clientName]: [presets...] }. The derived list + mutators that depend
+  // on the active client are defined later, after `activeClient` exists.
+  const [layoutPresetsByClient, setLayoutPresetsByClient] = usePersistedState("serafina-layouts-by-client", {});
+
+  // One-time migration: fold the old global list ("serafina-layouts") into a
+  // shared bucket so existing layouts aren't lost on upgrade.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const legacyRaw = await appStorage.get("serafina-layouts");
+      if (cancelled || !legacyRaw) return;
+      try {
+        const legacy = JSON.parse(legacyRaw);
+        if (Array.isArray(legacy) && legacy.length) {
+          setLayoutPresetsByClient(prev =>
+            prev.__migrado__ ? prev
+              : { ...prev, __migrado__: true, "__sem_cliente__": [ ...(prev["__sem_cliente__"] || []), ...legacy ] });
+        }
+      } catch {}
+      appStorage.remove("serafina-layouts");
+    })();
+    return () => { cancelled = true; };
+  }, [setLayoutPresetsByClient]);
 
   // Custom fonts — auto-persisted; load + register with FontFace on change
   const addCustomFont = useCallback((font) => {
@@ -599,6 +612,31 @@ function useAppStore() {
   const [savedPlans, setSavedPlans] = usePersistedState("serafina-plans", []);
   const [activePlanId, setActivePlanId] = useState(null);
   const [activeClient, setActiveClient] = useState(null);
+
+  // ----- Per-client layout presets (depend on the active client) -----
+  const presetClientKey = activeClient || "__sem_cliente__";
+  const layoutPresets = layoutPresetsByClient[presetClientKey] || [];
+  const saveLayoutPreset = useCallback((name, overrides) => {
+    const id = `layout-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+    const preset = { id, name: name.trim(), overrides: { ...(overrides || {}) }, savedAt: new Date().toISOString() };
+    setLayoutPresetsByClient(prev => ({
+      ...prev,
+      [presetClientKey]: [ ...(prev[presetClientKey] || []), preset ],
+    }));
+    return preset;
+  }, [presetClientKey, setLayoutPresetsByClient]);
+  const removeLayoutPreset = useCallback((id) => {
+    setLayoutPresetsByClient(prev => ({
+      ...prev,
+      [presetClientKey]: (prev[presetClientKey] || []).filter(p => p.id !== id),
+    }));
+  }, [presetClientKey, setLayoutPresetsByClient]);
+  const renameLayoutPreset = useCallback((id, name) => {
+    setLayoutPresetsByClient(prev => ({
+      ...prev,
+      [presetClientKey]: (prev[presetClientKey] || []).map(p => p.id === id ? { ...p, name } : p),
+    }));
+  }, [presetClientKey, setLayoutPresetsByClient]);
 
   const savePlan = useCallback(({ client, month, year, name }) => {
     const id = `plan-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
@@ -1431,6 +1469,10 @@ function computeLayerStyles(post, design, scale = 1) {
   } : { background: "transparent" };
 
   const posSpec = POSITION_MAP[eff.contentPosition] || POSITION_MAP["bottom-left"];
+  // Optional vertical nudge of the whole content block (negative = up).
+  const offsetY = (eff.contentOffsetY ?? 0) * scale;
+  const combinedTransform = [posSpec.transform, offsetY ? `translateY(${offsetY}px)` : null]
+    .filter(Boolean).join(" ") || undefined;
   // Absolute-position the block within the padded inner frame.
   const blockStyle = {
     position: "absolute",
@@ -1438,7 +1480,7 @@ function computeLayerStyles(post, design, scale = 1) {
     left: posSpec.left,
     right: posSpec.right,
     bottom: posSpec.bottom,
-    transform: posSpec.transform,
+    transform: combinedTransform,
   };
   // Filter undefined keys to keep style object clean
   Object.keys(blockStyle).forEach(k => blockStyle[k] === undefined && delete blockStyle[k]);
@@ -1494,16 +1536,19 @@ function PostCanvas({
   size = 400,
   className = "",
 }) {
-  const layers = computeLayerStyles(post, design);
-  const eff = layers.eff;
   const aspect = 4 / 5;
   const w = size;
   const h = size / aspect;
-
   const titleScale = w / 400;
+
+  const layers = computeLayerStyles(post, design, titleScale);
+  const eff = layers.eff;
+
+  const rootRef = useRefC(null);
 
   return (
     <div
+      ref={rootRef}
       className={`post-canvas ${className}`}
       style={{ width: w, height: h }}
     >
@@ -1560,7 +1605,9 @@ function PostCanvas({
               const gapPx = (eff.titleSubtitleGap ?? 14) * titleScale;
 
               // Per-line highlight: box-decoration-break clones the bg onto each
-              // wrapped line; tall line-height creates the spacing between boxes.
+              // wrapped line; the line-height beyond the box height becomes the
+              // gap between the per-line boxes (user-controllable).
+              const lineGap = (eff.textBoxLineGap ?? 10) * titleScale;
               const lineHL = (fontPx) => ({
                 display: "inline",
                 boxDecorationBreak: "clone",
@@ -1568,7 +1615,7 @@ function PostCanvas({
                 background: `rgba(${r.r},${r.g},${r.b},${op})`,
                 padding: `${pad * 0.32}px ${pad * 0.55}px`,
                 borderRadius: `${radius}px`,
-                lineHeight: `${fontPx + pad * 0.64 + pad * 0.55}px`,
+                lineHeight: `${fontPx + pad * 0.64 + lineGap}px`,
               });
 
               const titleStyle = {
@@ -1691,36 +1738,60 @@ function PostCanvas({
         </div>
       )}
 
-      {/* Layer 4.5: Brand decorative element */}
+      {/* Layer 4.5: Brand decorative element — free placement (X/Y %) with
+          drag support; falls back to legacy 9-position presets. */}
       {eff.showElement && eff.elementUrl && (() => {
-        const inset = 20 * titleScale;
         const sz = (eff.elementSize ?? 80) * titleScale;
-        const ep = eff.elementPosition || "bottom-right";
-        const map = {
-          "top-left":     { top: inset, left: inset },
-          "top-center":   { top: inset, left: "50%", transform: "translateX(-50%)" },
-          "top-right":    { top: inset, right: inset },
-          "mid-left":     { top: "50%", left: inset, transform: "translateY(-50%)" },
-          "mid-center":   { top: "50%", left: "50%", transform: "translate(-50%, -50%)" },
-          "mid-right":    { top: "50%", right: inset, transform: "translateY(-50%)" },
-          "bottom-left":  { bottom: inset, left: inset },
-          "bottom-center":{ bottom: inset, left: "50%", transform: "translateX(-50%)" },
-          "bottom-right": { bottom: inset, right: inset },
+        const presetXY = ({
+          "top-left":     { x: 12, y: 12 }, "top-center":    { x: 50, y: 12 }, "top-right":    { x: 88, y: 12 },
+          "mid-left":     { x: 12, y: 50 }, "mid-center":    { x: 50, y: 50 }, "mid-right":    { x: 88, y: 50 },
+          "bottom-left":  { x: 12, y: 88 }, "bottom-center": { x: 50, y: 88 }, "bottom-right": { x: 88, y: 88 },
+        })[eff.elementPosition || "bottom-right"] || { x: 88, y: 88 };
+        const ex = eff.elementXPct ?? presetXY.x;
+        const ey = eff.elementYPct ?? presetXY.y;
+
+        const startDrag = (e) => {
+          if (!editable) return;
+          e.stopPropagation(); e.preventDefault();
+          const rect = rootRef.current.getBoundingClientRect();
+          const move = (ev) => {
+            const x = clamp(((ev.clientX - rect.left) / rect.width) * 100, 0, 100);
+            const y = clamp(((ev.clientY - rect.top) / rect.height) * 100, 0, 100);
+            onUpdate?.({ overrides: {
+              ...(post.overrides || {}),
+              elementXPct: Math.round(x * 10) / 10,
+              elementYPct: Math.round(y * 10) / 10,
+            } });
+          };
+          const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+          };
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", up);
         };
-        const box = map[ep] || map["bottom-right"];
+
         return (
-          <div style={{
-            position: "absolute",
-            ...box,
-            width: sz, height: sz,
-            backgroundImage: `url(${eff.elementUrl})`,
-            backgroundSize: "contain",
-            backgroundRepeat: "no-repeat",
-            backgroundPosition: "center",
-            opacity: (eff.elementOpacity ?? 100) / 100,
-            zIndex: 3,
-            pointerEvents: "none",
-          }} />
+          <div
+            onPointerDown={startDrag}
+            onMouseDown={(e) => { if (editable) e.stopPropagation(); }}
+            onClick={(e) => { if (editable) e.stopPropagation(); }}
+            title={editable ? "Arraste para posicionar livremente" : undefined}
+            style={{
+              position: "absolute",
+              left: `${ex}%`, top: `${ey}%`,
+              transform: "translate(-50%, -50%)",
+              width: sz, height: sz,
+              backgroundImage: `url(${eff.elementUrl})`,
+              backgroundSize: "contain",
+              backgroundRepeat: "no-repeat",
+              backgroundPosition: "center",
+              opacity: (eff.elementOpacity ?? 100) / 100,
+              zIndex: 3,
+              pointerEvents: editable ? "auto" : "none",
+              cursor: editable ? "grab" : "default",
+              touchAction: "none",
+            }} />
         );
       })()}
 
@@ -3901,11 +3972,20 @@ function EditorSidebar({ store }) {
           <span className="value">{eff.contentPadding ?? 36}px</span>
         </div>
 
+        {/* Vertical nudge — move the whole content block up / down */}
+        <OverrideLabel name="Mover vertical (↑ / ↓)" active={has("contentOffsetY")}
+        onReset={() => clearOverride("contentOffsetY")} />
+        <div className="slider-row" style={{ marginBottom: 14 }}>
+          <input type="range" min="-300" max="300" value={eff.contentOffsetY ?? 0}
+          onChange={(e) => setOverride("contentOffsetY", +e.target.value)} />
+          <span className="value">{eff.contentOffsetY ?? 0}px</span>
+        </div>
+
         {/* Content max-width */}
         <OverrideLabel name="Largura máxima do texto" active={has("contentMaxWidth")}
         onReset={() => clearOverride("contentMaxWidth")} />
         <div className="slider-row" style={{ marginBottom: 14 }}>
-          <input type="range" min="30" max="100" value={eff.contentMaxWidth ?? 100}
+          <input type="range" min="30" max="200" value={eff.contentMaxWidth ?? 100}
           onChange={(e) => setOverride("contentMaxWidth", +e.target.value)} />
           <span className="value">{eff.contentMaxWidth ?? 100}%</span>
         </div>
@@ -4027,6 +4107,18 @@ function EditorSidebar({ store }) {
               }}>
                   Cada linha do texto ganha sua própria caixa, espaçada. Diminua a “Largura máxima do texto” para quebrar em mais linhas.
                 </div>
+              }
+
+              {eff.textBoxMode === "lines" &&
+              <>
+                <OverrideLabel name="Espaço entre as caixas" active={has("textBoxLineGap")}
+              onReset={() => clearOverride("textBoxLineGap")} />
+                <div className="slider-row" style={{ marginBottom: 10 }}>
+                  <input type="range" min="0" max="40" value={eff.textBoxLineGap ?? 10}
+                onChange={(e) => setOverride("textBoxLineGap", +e.target.value)} />
+                  <span className="value">{eff.textBoxLineGap ?? 10}px</span>
+                </div>
+              </>
               }
 
               <OverrideLabel name="Caixa no subtítulo" active={has("textBoxSubtitle")}
@@ -4179,22 +4271,45 @@ function EditorSidebar({ store }) {
                 </div>
             }
 
-              <OverrideLabel name="Posição" active={has("elementPosition")}
-            onReset={() => clearOverride("elementPosition")} />
+              <OverrideLabel name="Posição rápida" active={has("elementPosition") || has("elementXPct") || has("elementYPct")}
+            onReset={() => { clearOverride("elementPosition"); clearOverride("elementXPct"); clearOverride("elementYPct"); }} />
               <div className="pos-grid" style={{ maxWidth: "100%", marginBottom: 10, gridTemplateColumns: "repeat(3,1fr)", aspectRatio: "1" }}>
-                {["top-left", "top-center", "top-right", "mid-left", "mid-center", "mid-right", "bottom-left", "bottom-center", "bottom-right"].map((k) =>
+                {[["top-left",12,12],["top-center",50,12],["top-right",88,12],["mid-left",12,50],["mid-center",50,50],["mid-right",88,50],["bottom-left",12,88],["bottom-center",50,88],["bottom-right",88,88]].map(([k,x,y]) =>
               <div key={k}
-              className={`pos-cell ${(eff.elementPosition || "bottom-right") === k ? "active" : ""}`}
-              onClick={() => setOverride("elementPosition", k)}
+              className={`pos-cell ${(eff.elementXPct ?? 88) === x && (eff.elementYPct ?? 88) === y ? "active" : ""}`}
+              onClick={() => { setOverride("elementPosition", k); setOverride("elementXPct", x); setOverride("elementYPct", y); }}
               title={k} />
 
               )}
               </div>
 
+              <div style={{
+                fontFamily: "var(--font-mono)", fontSize: 9.5, lineHeight: 1.5,
+                color: "var(--fg-muted)", margin: "0 0 10px", letterSpacing: "0.03em",
+              }}>
+                Dica: arraste o elemento direto no post para posicioná-lo livremente — pode ficar em qualquer lugar, inclusive sobre as bordas.
+              </div>
+
+              <OverrideLabel name="Horizontal" active={has("elementXPct")}
+            onReset={() => clearOverride("elementXPct")} />
+              <div className="slider-row" style={{ marginBottom: 10 }}>
+                <input type="range" min="0" max="100" value={eff.elementXPct ?? 88}
+              onChange={(e) => setOverride("elementXPct", +e.target.value)} />
+                <span className="value">{eff.elementXPct ?? 88}%</span>
+              </div>
+
+              <OverrideLabel name="Vertical" active={has("elementYPct")}
+            onReset={() => clearOverride("elementYPct")} />
+              <div className="slider-row" style={{ marginBottom: 10 }}>
+                <input type="range" min="0" max="100" value={eff.elementYPct ?? 88}
+              onChange={(e) => setOverride("elementYPct", +e.target.value)} />
+                <span className="value">{eff.elementYPct ?? 88}%</span>
+              </div>
+
               <OverrideLabel name="Tamanho" active={has("elementSize")}
             onReset={() => clearOverride("elementSize")} />
               <div className="slider-row" style={{ marginBottom: 10 }}>
-                <input type="range" min="20" max="400" value={eff.elementSize ?? 80}
+                <input type="range" min="20" max="1000" value={eff.elementSize ?? 80}
               onChange={(e) => setOverride("elementSize", +e.target.value)} />
                 <span className="value">{eff.elementSize ?? 80}px</span>
               </div>
