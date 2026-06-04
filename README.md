@@ -86,7 +86,19 @@ A ferramenta sincroniza **clientes, planejamentos, posts e design system** com o
 
 - Credenciais e mapeamento de tabelas ficam em `App.jsx` (seção `supabase-sync.jsx`).
 - O cliente JS do Supabase é carregado via CDN no `index.html`.
-- O badge **"Nuvem"** no topo mostra o status (`Salvando…` / `Salvo` / `Erro`) e lista os clientes salvos na nuvem — clicar em um cliente carrega posts + design dele.
+- O badge **"Nuvem"** no topo mostra o status (`Salvando…` / `Salvo ✓ HH:MM` / `Erro ao salvar ✗`) e lista os clientes salvos na nuvem — clicar em um cliente carrega posts + design dele.
+- **Auto-save automático:** qualquer edição é salva sozinha (debounce 2s). Se ainda não houver um plano na nuvem, ele é criado automaticamente (cliente = cliente ativo ou nome da marca). Não é preciso clicar em “salvar”.
+- **Ao abrir o app:** uma tela de “Carregando dados…” busca os clientes do Supabase e carrega automaticamente o último cliente ativo (posts + design) — sem depender do `localStorage`.
+
+### ⚠️ Coluna `extras` (recomendado — estilos avançados)
+
+A tabela `posts` tem colunas fixas para os campos principais. Estilos avançados (entrelinha, cor do subtítulo, caixa de texto, elemento livre, cor por palavra etc.) são gravados numa coluna **`extras` (jsonb)** quando ela existe. Sem ela, esses ajustes finos voltam ao padrão ao recarregar (o conteúdo principal persiste normalmente). Para ativar a fidelidade total, rode uma vez no **SQL Editor**:
+
+```sql
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS extras jsonb;
+```
+
+O app detecta a coluna automaticamente — com ou sem ela o salvamento nunca quebra.
 
 ### ⚠️ Bucket de imagens (passo manual obrigatório)
 
@@ -106,4 +118,4 @@ create policy "anon update planflow"
   using ( bucket_id = 'planflow-imagens' );
 ```
 
-Enquanto o bucket não existir, os posts ainda salvam normalmente (texto + layout + design system) — apenas as imagens não são enviadas, e o badge avisa.
+Enquanto o bucket não existir, os posts ainda salvam normalmente (texto + layout + design system) e as imagens ficam guardadas no próprio banco como fallback (base64), então **nada some ao recarregar** — criar o bucket apenas migra as imagens para um armazenamento mais leve e o badge deixa de avisar.

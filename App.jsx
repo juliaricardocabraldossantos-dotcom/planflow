@@ -7,7 +7,7 @@
 
 
 // ╔══════════════════════════════════════════════════════════╗
-// ║  store.jsx                                             ║
+// ║  store.jsx                                               ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -481,6 +481,18 @@ function hexToRgb(hex) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// Strip HTML tags → plain text. Title/subtitle may contain inline <span
+// style="color:…"> markup from the per-word color tool; use this anywhere
+// the value must be shown or processed as plain text.
+function htmlToText(s) {
+  if (s == null) return "";
+  const str = String(s);
+  if (!/[<&]/.test(str)) return str;            // fast path: no markup
+  const d = document.createElement("div");
+  d.innerHTML = str;
+  return (d.textContent || d.innerText || "").trim();
+}
+
 // ----------------------------- Claude API -----------------------------------
 
 async function callClaude(prompt) {
@@ -502,8 +514,11 @@ function useAppStore() {
   const [design, setDesign] = useState(initialDesign);
   const [selectedPostId, setSelectedPostId] = useState(null);
   const [toast, setToast] = useState(null);
-  const [customPalettes, setCustomPalettes] = usePersistedState("serafina-palettes", []);
-  const [hiddenPalettes, setHiddenPalettes] = usePersistedState("serafina-palettes-hidden", []);
+  // Custom palettes + hidden built-ins are PER CLIENT (each client's design
+  // system has its own). Stored as maps { [clientName]: [...] }. The derived
+  // lists + mutators are defined later, after `activeClient` exists.
+  const [customPalettesByClient, setCustomPalettesByClient] = usePersistedState("serafina-palettes-by-client", {});
+  const [hiddenPalettesByClient, setHiddenPalettesByClient] = usePersistedState("serafina-palettes-hidden-by-client", {});
   const [customFonts, setCustomFonts] = usePersistedState("serafina-fonts", []);
   const [savedBrands, setSavedBrands] = usePersistedState("serafina-brands", []);
   const [activeBrandId, setActiveBrandId] = useState(null);
@@ -513,22 +528,33 @@ function useAppStore() {
     setTheme(t => (t === "dark" ? "light" : "dark"));
   }, [setTheme]);
 
-  const addPalette = useCallback((palette) => {
-    setCustomPalettes([...customPalettes, palette]);
-  }, [customPalettes, setCustomPalettes]);
-
-  const removePalette = useCallback((name) => {
-    setCustomPalettes(customPalettes.filter(p => p.name !== name));
-  }, [customPalettes, setCustomPalettes]);
-
-  // Hide built-in palette (can't delete, but can hide)
-  const hideBuiltinPalette = useCallback((name) => {
-    if (hiddenPalettes.includes(name)) return;
-    setHiddenPalettes([...hiddenPalettes, name]);
-  }, [hiddenPalettes, setHiddenPalettes]);
-  const restoreBuiltinPalette = useCallback((name) => {
-    setHiddenPalettes(hiddenPalettes.filter(n => n !== name));
-  }, [hiddenPalettes, setHiddenPalettes]);
+  // Migrate old GLOBAL palettes/hidden lists into the shared (__sem_cliente__)
+  // bucket so nothing is lost on upgrade. Runs once.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const oldPal = await appStorage.get("serafina-palettes");
+      const oldHid = await appStorage.get("serafina-palettes-hidden");
+      if (cancelled) return;
+      try {
+        const pal = oldPal ? JSON.parse(oldPal) : null;
+        if (Array.isArray(pal) && pal.length) {
+          setCustomPalettesByClient(prev => prev.__migrado__ ? prev
+            : { ...prev, __migrado__: true, "__sem_cliente__": [ ...(prev["__sem_cliente__"] || []), ...pal ] });
+        }
+      } catch {}
+      try {
+        const hid = oldHid ? JSON.parse(oldHid) : null;
+        if (Array.isArray(hid) && hid.length) {
+          setHiddenPalettesByClient(prev => prev.__migrado__ ? prev
+            : { ...prev, __migrado__: true, "__sem_cliente__": [ ...new Set([ ...(prev["__sem_cliente__"] || []), ...hid ]) ] });
+        }
+      } catch {}
+      appStorage.remove("serafina-palettes");
+      appStorage.remove("serafina-palettes-hidden");
+    })();
+    return () => { cancelled = true; };
+  }, [setCustomPalettesByClient, setHiddenPalettesByClient]);
 
   // Layout presets — saved per CLIENT so each client's design system keeps
   // its own layouts (no cross-client repetition). Stored as a map
@@ -637,6 +663,35 @@ function useAppStore() {
       [presetClientKey]: (prev[presetClientKey] || []).map(p => p.id === id ? { ...p, name } : p),
     }));
   }, [presetClientKey, setLayoutPresetsByClient]);
+
+  // ----- Per-client palettes + hidden built-ins -----
+  const customPalettes = customPalettesByClient[presetClientKey] || [];
+  const hiddenPalettes = hiddenPalettesByClient[presetClientKey] || [];
+  const addPalette = useCallback((palette) => {
+    setCustomPalettesByClient(prev => ({
+      ...prev,
+      [presetClientKey]: [ ...(prev[presetClientKey] || []), palette ],
+    }));
+  }, [presetClientKey, setCustomPalettesByClient]);
+  const removePalette = useCallback((name) => {
+    setCustomPalettesByClient(prev => ({
+      ...prev,
+      [presetClientKey]: (prev[presetClientKey] || []).filter(p => p.name !== name),
+    }));
+  }, [presetClientKey, setCustomPalettesByClient]);
+  const hideBuiltinPalette = useCallback((name) => {
+    setHiddenPalettesByClient(prev => {
+      const cur = prev[presetClientKey] || [];
+      if (cur.includes(name)) return prev;
+      return { ...prev, [presetClientKey]: [ ...cur, name ] };
+    });
+  }, [presetClientKey, setHiddenPalettesByClient]);
+  const restoreBuiltinPalette = useCallback((name) => {
+    setHiddenPalettesByClient(prev => ({
+      ...prev,
+      [presetClientKey]: (prev[presetClientKey] || []).filter(n => n !== name),
+    }));
+  }, [presetClientKey, setHiddenPalettesByClient]);
 
   const savePlan = useCallback(({ client, month, year, name }) => {
     const id = `plan-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
@@ -767,15 +822,16 @@ Object.assign(window, {
   useAppStore,
   parsePlan, parseSinglePost, makePost,
   readFileText, readFileDataURL,
-  hexToRgb, clamp,
+  hexToRgb, clamp, htmlToText,
   callClaude,
   demoPlan,
   FONT_OPTIONS, FONT_GROUPS, POSITION_KEYS, POSITION_MAP, PALETTES,
   DEFAULT_DESIGN,
 });
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  supabase-sync.jsx                                     ║
+// ║  supabase-sync.jsx                                       ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -817,10 +873,30 @@ window.sbClient = sbClient;
 
 // ----------------------------- Field mapping -----------------------------
 // Local post  <->  posts table row.
+//
+// The posts table has fixed columns (no generic JSONB), so advanced style
+// overrides (line-height, subtitle color, text box, free element, etc.) are
+// stored in an OPTIONAL `extras` jsonb column when it exists. We probe for it
+// once at runtime and degrade gracefully (named columns only) when it's absent
+// — so saving never breaks, and gains full fidelity once the column is added:
+//   ALTER TABLE posts ADD COLUMN extras jsonb;
 
-function postToRow(p, planejamentoId, ordem, imagemUrl) {
+let postsHasExtras = null; // null = not probed yet
+async function probeExtrasColumn() {
+  if (postsHasExtras !== null) return postsHasExtras;
+  try {
+    const { error } = await sbClient.from("posts").select("extras").limit(1);
+    postsHasExtras = !error;
+  } catch { postsHasExtras = false; }
+  if (!postsHasExtras) {
+    console.info('[Supabase] coluna "posts.extras" ausente — estilos avançados não persistem. Para ativar: ALTER TABLE posts ADD COLUMN extras jsonb;');
+  }
+  return postsHasExtras;
+}
+
+function postToRow(p, planejamentoId, ordem, imagemUrl, withExtras) {
   const o = p.overrides || {};
-  return {
+  const row = {
     planejamento_id: planejamentoId,
     label: p.label || null,
     data: p.date || null,
@@ -840,15 +916,29 @@ function postToRow(p, planejamentoId, ordem, imagemUrl) {
     overlay_opacity: o.overlayOpacity ?? null,
     ordem,
   };
+  if (withExtras) {
+    // Everything needed to perfectly restore the post that ISN'T already a
+    // dedicated column. The full overrides object is the important part.
+    row.extras = {
+      overrides: o,
+      fileName: p.fileName || null,
+    };
+  }
+  return row;
 }
 
 function rowToPost(row, idx) {
-  const overrides = {};
+  // Start from the named columns (works even without the extras column)…
+  let overrides = {};
   if (row.title_size != null) overrides.titleSize = row.title_size;
   if (row.subtitle_size != null) overrides.subtitleSize = row.subtitle_size;
   if (row.title_align) overrides.titleAlign = row.title_align;
   if (row.content_pos) overrides.contentPosition = row.content_pos;
   if (row.overlay_opacity != null) overrides.overlayOpacity = row.overlay_opacity;
+  // …then overlay the full overrides object when extras is present.
+  if (row.extras && row.extras.overrides) {
+    overrides = { ...overrides, ...row.extras.overrides };
+  }
   return {
     id: `post-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`,
     label: row.label || row.titulo || `Post ${idx + 1}`,
@@ -862,7 +952,7 @@ function rowToPost(row, idx) {
     imageScale: row.imagem_scale ?? 100,
     imagePosX: row.imagem_pos_x ?? 50,
     imagePosY: row.imagem_pos_y ?? 50,
-    fileName: null,
+    fileName: (row.extras && row.extras.fileName) || null,
     overrides,
   };
 }
@@ -914,18 +1004,28 @@ async function ensureBucket() {
   }
 }
 
-async function uploadImageIfNeeded(imageSrc, planejamentoId, idx) {
-  if (!sbClient || !imageSrc) return imageSrc || null;
-  // Already a remote URL → keep as-is.
-  if (!/^data:/.test(imageSrc)) return imageSrc;
+// EAGER upload — call the moment the user picks an image (post photo, avatar,
+// logo). Converts a base64 data URL → blob → Storage object → public URL, so
+// React state holds ONLY the lightweight URL and base64 never reaches the DB.
+// Idempotent: an existing http(s) URL is returned untouched, and identical
+// content is de-duped via the content-hash cache. Throws on a real failure so
+// the caller can decide to keep the local base64 as a temporary fallback.
+async function uploadDataUrlToBucket(dataUrl, namePrefix) {
+  if (!sbClient || !dataUrl) return dataUrl || null;
+  // Already a remote URL → keep as-is (nothing to upload).
+  if (!/^data:/.test(dataUrl)) return dataUrl;
 
-  const key = hashString(imageSrc);
+  await ensureBucket();
+
+  const key = hashString(dataUrl);
   if (imgCache[key]) return imgCache[key];
 
-  const mime = (imageSrc.match(/^data:(.*?);/) || [])[1] || "image/png";
+  const mime = (dataUrl.match(/^data:(.*?);/) || [])[1] || "image/png";
   const ext = (mime.split("/")[1] || "png").replace("+xml", "");
-  const blob = await (await fetch(imageSrc)).blob();
-  const path = `${planejamentoId}/${idx}-${key}.${ext}`;
+  const blob = await (await fetch(dataUrl)).blob();
+  const safePrefix = String(namePrefix || "img")
+    .replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48) || "img";
+  const path = `${safePrefix}_${Date.now()}_${key}.${ext}`;
 
   const { error } = await sbClient.storage
     .from(BUCKET)
@@ -936,7 +1036,17 @@ async function uploadImageIfNeeded(imageSrc, planejamentoId, idx) {
   const url = data.publicUrl;
   imgCache[key] = url;
   saveImgCache(imgCache);
+  console.log(`%c☁ Imagem salva no Storage: ${url}`, "color:#1F8A5B;font-weight:600");
   return url;
+}
+window.uploadDataUrlToBucket = uploadDataUrlToBucket;
+
+async function uploadImageIfNeeded(imageSrc, planejamentoId, idx) {
+  if (!sbClient || !imageSrc) return imageSrc || null;
+  // Already a remote URL → keep as-is.
+  if (!/^data:/.test(imageSrc)) return imageSrc;
+  // Delegate to the shared eager uploader (content-hash de-duped).
+  return uploadDataUrlToBucket(imageSrc, `post_${planejamentoId}`);
 }
 
 // ----------------------------- DB operations -----------------------------
@@ -972,32 +1082,50 @@ async function ensurePlanejamento({ planejamentoId, clienteId, nome, mes }) {
   return data.id;
 }
 
+function plainTitle(p) {
+  return String(p.title || p.label || "(sem título)").replace(/<[^>]+>/g, "").slice(0, 40);
+}
+
 async function syncPosts(planejamentoId, posts) {
   // Upload images first, build rows, then replace all rows for this plan.
-  // Image-upload failures are non-fatal: the post still syncs (text +
-  // layout), just without imagem_url. We report how many images failed so
-  // the badge can warn (usually means the Storage bucket is missing).
+  // Image handling is resilient: try Storage upload → public URL; if that
+  // fails (e.g. bucket missing), fall back to storing the base64 data URL
+  // directly in imagem_url so the image STILL survives a reload. We report
+  // how many images couldn't reach Storage so the badge can nudge the user
+  // to create the bucket (the proper, lighter long-term storage).
+  const withExtras = await probeExtrasColumn();
   let imageFails = 0;
   const rows = [];
   for (let i = 0; i < posts.length; i++) {
+    const src = posts[i].imageSrc || "";
     let url = null;
     try {
-      url = await uploadImageIfNeeded(posts[i].imageSrc, planejamentoId, i);
+      url = await uploadImageIfNeeded(src, planejamentoId, i);
     } catch (e) {
-      if (posts[i].imageSrc) imageFails++;
-      console.warn(`Image upload failed for post ${i}:`, e.message || e);
-      // Keep an already-remote URL if the source was one; else null.
-      url = /^https?:/.test(posts[i].imageSrc || "") ? posts[i].imageSrc : null;
+      console.warn(`Upload de imagem falhou no post ${i + 1}:`, e.message || e);
+      if (/^data:/.test(src)) {
+        imageFails++;
+        // Fallback: persist the data URL itself (guard against huge payloads).
+        url = src.length < 1500000 ? src : null;
+        if (!url) console.warn(`Imagem do post ${i + 1} grande demais para fallback — crie o bucket "${BUCKET}".`);
+      } else {
+        url = /^https?:/.test(src) ? src : null;
+      }
     }
-    rows.push(postToRow(posts[i], planejamentoId, i, url));
+    rows.push(postToRow(posts[i], planejamentoId, i, url, withExtras));
   }
+
+  // Replace all rows for this plan atomically (delete + insert).
   const { error: delErr } = await sbClient.from("posts")
     .delete().eq("planejamento_id", planejamentoId);
   if (delErr) throw delErr;
   if (rows.length) {
     const { error: insErr } = await sbClient.from("posts").insert(rows);
     if (insErr) throw insErr;
+    posts.forEach((p, i) =>
+      console.log(`%c✓ Post ${i + 1} "${plainTitle(p)}" salvo no Supabase`, "color:#1F8A5B;font-weight:600"));
   }
+  console.log(`%c✓ ${rows.length} post(s) salvos no plano ${planejamentoId}`, "color:#1F8A5B;font-weight:700");
   return { imageFails };
 }
 
@@ -1026,14 +1154,21 @@ function useSupabaseSync(base) {
   const [lastSavedAt, setLastSavedAt] = useStateSB(null);
   const [clients, setClients] = useStateSB([]);
   const [errMsg, setErrMsg] = useStateSB(null);
+  // Cloud bootstrap: while true the app shows a loading screen and waits for
+  // the initial fetch (clients + last active client's posts + design).
+  const [booting, setBooting] = useStateSB(enabled);
 
   const activeRef = useRefSB({ clienteId: null, planejamentoId: null });
   const mapRef = useRefSB(loadCloudMap());
   const postsRef = useRefSB(base.posts);
   const designRef = useRefSB(base.design);
+  const activeClientRef = useRefSB(base.activeClient);
+  const provisioningRef = useRefSB(null);
+  const justLoadedRef = useRefSB(0);
   const debRef = useRefSB(null);
   postsRef.current = base.posts;
   designRef.current = base.design;
+  activeClientRef.current = base.activeClient;
 
   const reloadClients = useCallbackSB(async () => {
     if (!enabled) return;
@@ -1049,30 +1184,66 @@ function useSupabaseSync(base) {
     }
   }, [enabled]);
 
-  // Initial: ensure bucket + load clients.
+  // Initial: ensure bucket exists (clients + active data are loaded by the
+  // bootstrap effect below, which also drives the loading screen).
   useEffectSB(() => {
-    if (!enabled) return;
+    if (!enabled) { setBooting(false); return; }
     ensureBucket();
-    reloadClients();
-  }, [enabled, reloadClients]);
+  }, [enabled]);
 
-  // Push current posts + design to the active cloud plan.
+  // Auto-provision a cloud cliente + planejamento when none is active yet, so
+  // edits ALWAYS persist — even if the user never clicked "Salvar plano".
+  // Guarded against concurrent calls so we never create duplicate plans.
+  const ensureActivePlan = useCallbackSB(async () => {
+    if (activeRef.current.planejamentoId) return activeRef.current;
+    if (provisioningRef.current) return provisioningRef.current;
+    const job = (async () => {
+      const clienteNome =
+        (activeClientRef.current && activeClientRef.current.trim()) ||
+        (designRef.current && designRef.current.brandName && designRef.current.brandName.trim()) ||
+        "Sem cliente";
+      const mes = new Date().getMonth() + 1;
+      const clienteId = await ensureCliente(clienteNome);
+      const planejamentoId = await ensurePlanejamento({ planejamentoId: null, clienteId, nome: null, mes });
+      activeRef.current = { clienteId, planejamentoId };
+      if (!activeClientRef.current) base.setActiveClient(clienteNome);
+      console.log(`%c☁ Plano criado automaticamente para "${clienteNome}"`, "color:#2A6FDB;font-weight:600");
+      reloadClients();
+      return activeRef.current;
+    })();
+    provisioningRef.current = job;
+    try { return await job; }
+    finally { provisioningRef.current = null; }
+  }, [reloadClients]);
+
+  // Push current posts + design to the active cloud plan (provisioning one if
+  // needed). No-op when there's nothing to save.
   const pushPostsAndDesign = useCallbackSB(async () => {
-    const { clienteId, planejamentoId } = activeRef.current;
-    if (!clienteId || !planejamentoId) return;
+    let active = activeRef.current;
+    if (!active.planejamentoId) {
+      if (!postsRef.current || postsRef.current.length === 0) return; // nothing yet
+      try {
+        active = await ensureActivePlan();
+      } catch (e) {
+        console.warn("auto-provision falhou:", e);
+        setStatus("error");
+        setErrMsg(e.message || "Erro ao criar plano na nuvem");
+        return;
+      }
+    }
     setStatus("saving");
     try {
-      const { imageFails } = await syncPosts(planejamentoId, postsRef.current);
-      await syncDesign(clienteId, designRef.current);
+      const { imageFails } = await syncPosts(active.planejamentoId, postsRef.current);
+      await syncDesign(active.clienteId, designRef.current);
       setStatus("saved");
       setLastSavedAt(Date.now());
-      setErrMsg(imageFails ? `${imageFails} imagem(ns) não enviada(s) — crie o bucket "${BUCKET}"` : null);
+      setErrMsg(imageFails ? `${imageFails} imagem(ns) não enviada(s) ao Storage — crie o bucket "${BUCKET}" (estão salvas no banco como fallback)` : null);
     } catch (e) {
       console.warn("pushPostsAndDesign failed:", e);
       setStatus("error");
       setErrMsg(e.message || "Erro ao salvar");
     }
-  }, []);
+  }, [ensureActivePlan]);
 
   // Ensure cliente + planejamento exist, set active ids, persist map, push.
   const pushAll = useCallbackSB(async ({ clienteNome, mes, nome, localId }) => {
@@ -1102,10 +1273,16 @@ function useSupabaseSync(base) {
     }
   }, [enabled, reloadClients]);
 
-  // Debounced autosave whenever posts/design change AND a cloud plan is active.
+  // Debounced autosave whenever posts/design change. Fires even without an
+  // active cloud plan — pushPostsAndDesign will auto-provision one — as long
+  // as there's at least one post. A short guard suppresses the redundant
+  // save triggered by openCloudClient populating the state right after load.
   useEffectSB(() => {
     if (!enabled) return;
-    if (!activeRef.current.planejamentoId) return;
+    if (Date.now() - justLoadedRef.current < 1800) return; // just loaded from cloud
+    const hasPlan = !!activeRef.current.planejamentoId;
+    const hasPosts = base.posts && base.posts.length > 0;
+    if (!hasPlan && !hasPosts) return; // nothing to persist yet
     setStatus("pending");
     clearTimeout(debRef.current);
     debRef.current = setTimeout(() => { pushPostsAndDesign(); }, 2000);
@@ -1144,7 +1321,9 @@ function useSupabaseSync(base) {
       base.setSelectedPostId(posts[0] ? posts[0].id : null);
       base.setActiveClient(cli.nome);
       activeRef.current = { clienteId: cli.id, planejamentoId: plan ? plan.id : null };
-      setStatus("saved");
+      justLoadedRef.current = Date.now();
+      console.log(`%c☁ "${cli.nome}" carregado do Supabase — ${posts.length} post(s)`, "color:#2A6FDB;font-weight:600");
+      setStatus(plan ? "saved" : "idle");
       setLastSavedAt(Date.now());
       setErrMsg(null);
     } catch (e) {
@@ -1153,6 +1332,48 @@ function useSupabaseSync(base) {
       setErrMsg(e.message || "Erro ao carregar da nuvem");
     }
   }, [enabled]);
+
+  // ----- Cloud bootstrap (runs once at startup) -----
+  // Fetches the client list from Supabase and auto-loads the LAST ACTIVE
+  // client (the one whose plan was updated most recently) — posts + design —
+  // BEFORE the app is shown. Never reads data from localStorage.
+  const bootstrap = useCallbackSB(async () => {
+    if (!enabled) { setBooting(false); return; }
+    try {
+      const { data: clientsData, error } = await sbClient
+        .from("clientes").select("id, nome, criado_em").order("nome");
+      if (error) throw error;
+      setClients(clientsData || []);
+
+      let target = null;
+      if (clientsData && clientsData.length) {
+        // "Último cliente ativo" = dono do planejamento atualizado mais recente.
+        const { data: recent } = await sbClient
+          .from("planejamentos").select("cliente_id")
+          .order("atualizado_em", { ascending: false }).limit(1);
+        if (recent && recent[0]) target = clientsData.find(c => c.id === recent[0].cliente_id);
+        if (!target) target = clientsData[0];
+      }
+      if (target) {
+        await openCloudClient(target);   // carrega posts + design do banco
+      }
+      setErrMsg(null);
+    } catch (e) {
+      console.warn("bootstrap (Supabase) falhou:", e);
+      setErrMsg(e.message || "Falha ao carregar dados do Supabase");
+    } finally {
+      setBooting(false);
+    }
+  }, [enabled, openCloudClient]);
+
+  useEffectSB(() => {
+    if (!enabled) return;
+    let done = false;
+    // Safety: never get stuck on the loading screen if the network hangs.
+    const t = setTimeout(() => { if (!done) setBooting(false); }, 12000);
+    bootstrap().finally(() => { done = true; clearTimeout(t); });
+    return () => clearTimeout(t);
+  }, [enabled, bootstrap]);
 
   // ----- Wrapped store actions (cloud-aware) -----
   const savePlan = useCallbackSB((args) => {
@@ -1216,6 +1437,7 @@ function useSupabaseSync(base) {
   return {
     store,
     enabled,
+    booting,
     status, lastSavedAt, errMsg,
     clients, reloadClients, openCloudClient,
   };
@@ -1234,12 +1456,18 @@ function relTime(ts) {
   return `há ${h}h`;
 }
 
+function clockTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 const SYNC_LABELS = {
   idle:     { dot: "idle",    text: "Nuvem" },
   pending:  { dot: "saving",  text: "Editando…" },
   saving:   { dot: "saving",  text: "Salvando…" },
-  saved:    { dot: "ok",      text: "Salvo" },
-  error:    { dot: "error",   text: "Erro" },
+  saved:    { dot: "ok",      text: "Salvo ✓" },
+  error:    { dot: "error",   text: "Erro ao salvar ✗" },
   disabled: { dot: "off",     text: "Offline" },
 };
 
@@ -1273,7 +1501,7 @@ function SyncBadge({ sync }) {
         title={sync.errMsg || (sync.enabled ? "Sincronização Supabase" : "Supabase indisponível")}>
         <span className="sync-dot" />
         <span className="sync-text">{meta.text}</span>
-        {showTime && <span className="sync-time">{relTime(sync.lastSavedAt)}</span>}
+        {showTime && <span className="sync-time">{clockTime(sync.lastSavedAt)}</span>}
       </button>
 
       {open && (
@@ -1287,7 +1515,7 @@ function SyncBadge({ sync }) {
 
           <div className="sync-pop-sub">
             {sync.lastSavedAt
-              ? `Última gravação ${relTime(sync.lastSavedAt)}`
+              ? `Última gravação às ${clockTime(sync.lastSavedAt)} (${relTime(sync.lastSavedAt)})`
               : "Auto-save a cada edição (2s)"}
           </div>
 
@@ -1317,8 +1545,9 @@ function SyncBadge({ sync }) {
 
 Object.assign(window, { useSupabaseSync, SyncBadge });
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  auth.jsx                                              ║
+// ║  auth.jsx                                                ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -1429,8 +1658,9 @@ function useAuth() {
 
 Object.assign(window, { useAuth });
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  canvas.jsx                                            ║
+// ║  canvas.jsx                                              ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -1495,35 +1725,82 @@ function computeLayerStyles(post, design, scale = 1) {
   };
 }
 
-// Inline-editable text element
-function EditableText({ value, onChange, style, className, placeholder, multiline = false }) {
+// Inline-editable text element. When `colorable`, stores HTML (so individual
+// words can carry their own color) and shows a floating color palette while
+// text is selected. Otherwise behaves as a plain-text field.
+function EditableText({ value, onChange, style, className, placeholder, multiline = false, colorable = false, palette = [] }) {
   const ref = useRefC(null);
-  const onBlur = (e) => {
-    const text = e.currentTarget.innerText;
-    if (text !== value) onChange(text);
+  const [tb, setTb] = useStateC(null); // floating toolbar position {left, top} or null
+
+  const save = () => {
+    if (!ref.current) return;
+    const html = ref.current.innerHTML;
+    if (html !== (value || "")) onChange(html);
   };
+  const onBlur = () => { save(); setTimeout(() => setTb(null), 120); };
   const onKey = (e) => {
-    if (!multiline && e.key === "Enter") {
-      e.preventDefault();
-      e.currentTarget.blur();
-    }
+    if (!multiline && e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); }
   };
+
   React.useEffect(() => {
-    if (ref.current && ref.current.innerText !== (value || "")) {
-      ref.current.innerText = value || "";
+    if (ref.current && ref.current.innerHTML !== (value || "")) {
+      ref.current.innerHTML = value || "";
     }
   }, [value]);
+
+  // Show the color palette whenever there's a non-collapsed selection inside
+  // this field. Uses the native `selectionchange` event (more reliable than
+  // React's synthetic mouseup for text selection).
+  React.useEffect(() => {
+    if (!colorable) return;
+    const onSelChange = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !ref.current || !ref.current.contains(sel.anchorNode)) {
+        setTb(null); return;
+      }
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      if (!rect || (!rect.width && !rect.height)) { setTb(null); return; }
+      setTb({ left: rect.left + rect.width / 2, top: rect.top - 8 });
+    };
+    document.addEventListener("selectionchange", onSelChange);
+    return () => document.removeEventListener("selectionchange", onSelChange);
+  }, [colorable]);
+
+  const applyColor = (color) => {
+    if (!ref.current) return;
+    ref.current.focus();
+    try {
+      document.execCommand("styleWithCSS", false, true);
+      document.execCommand("foreColor", false, color);
+    } catch (e) {}
+    save();
+  };
+
+  const swatches = [...new Set((palette || []).filter(Boolean))];
+
   return (
-    <div
-      ref={ref}
-      className={`contenteditable ${className || ""}`}
-      contentEditable
-      suppressContentEditableWarning
-      onBlur={onBlur}
-      onKeyDown={onKey}
-      style={style}
-      data-placeholder={placeholder}
-    />
+    <>
+      <div
+        ref={ref}
+        className={`contenteditable ${className || ""}`}
+        contentEditable
+        suppressContentEditableWarning
+        onBlur={onBlur}
+        onKeyDown={onKey}
+        style={style}
+        data-placeholder={placeholder}
+      />
+      {colorable && tb && (
+        <div className="text-color-toolbar"
+          style={{ position: "fixed", left: tb.left, top: tb.top, transform: "translate(-50%, -100%)", zIndex: 9999 }}
+          onMouseDown={(e) => e.preventDefault()}>
+          {swatches.map((c, i) => (
+            <button key={i} type="button" title={c}
+              style={{ background: c }} onClick={() => applyColor(c)} />
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1631,7 +1908,7 @@ function PostCanvas({
               const subStyle = {
                 fontFamily: eff.subtitleFont,
                 fontSize: `${subFontPx}px`,
-                color: eff.textColor,
+                color: eff.subtitleColor || eff.textColor,
                 opacity: 0.92,
                 textAlign: layers.textAlign,
                 width: "100%",
@@ -1640,17 +1917,21 @@ function PostCanvas({
                   : { marginTop: `${gapPx}px`, lineHeight: eff.subtitleLineHeight ?? 1.35 }),
               };
 
+              const colorPalette = [eff.textColor, eff.primaryColor, eff.secondaryColor, eff.overlayColor, "#FFFFFF", "#151619"];
+
               const titleEl = editable ? (
                 <EditableText value={post.title} onChange={(v) => onUpdate?.({ title: v })}
-                  className="post-title-text" style={titleStyle} placeholder="Título" multiline />
+                  className="post-title-text" style={titleStyle} placeholder="Título" multiline
+                  colorable palette={colorPalette} />
               ) : (
-                <h2 className="post-title-text" style={titleStyle}>{post.title}</h2>
+                <h2 className="post-title-text" style={titleStyle} dangerouslySetInnerHTML={{ __html: post.title || "" }} />
               );
               const subEl = editable ? (
                 <EditableText value={post.subtitle} onChange={(v) => onUpdate?.({ subtitle: v })}
-                  className="post-subtitle-text" style={subStyle} placeholder="Subtítulo" multiline />
+                  className="post-subtitle-text" style={subStyle} placeholder="Subtítulo" multiline
+                  colorable palette={colorPalette} />
               ) : (
-                post.subtitle ? <p className="post-subtitle-text" style={subStyle}>{post.subtitle}</p> : null
+                post.subtitle ? <p className="post-subtitle-text" style={subStyle} dangerouslySetInnerHTML={{ __html: post.subtitle }} /> : null
               );
 
               if (linesMode) {
@@ -1865,8 +2146,9 @@ window.effectiveDesign = effectiveDesign;
 
 // (cornerStyle is defined below for reuse)
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-plans.jsx                                       ║
+// ║  panel-plans.jsx                                         ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -2186,7 +2468,7 @@ function PlanCard({ plan, active, onLoad, onUpdate, onRename, onRemove }) {
                   WebkitLineClamp: 3,
                   WebkitBoxOrient: "vertical",
                   overflow: "hidden",
-                }}>{p.title}</span>
+                }}>{htmlToText(p.title)}</span>
               </div>
             );
           })
@@ -2338,8 +2620,9 @@ function SaveDialog({ store, onClose }) {
 window.PlansPanel = PlansPanel;
 window.MONTH_NAMES_FULL_PT = MONTH_NAMES_FULL_PT;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-upload.jsx                                      ║
+// ║  panel-upload.jsx                                        ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -2628,8 +2911,9 @@ as quebras de linha originais...
 
 window.UploadPanel = UploadPanel;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-design.jsx                                      ║
+// ║  panel-design.jsx                                        ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -2696,15 +2980,30 @@ function DesignPanel({ store, onGoNext }) {
 
   const handleLogoUpload = async (file) => {
     if (!file) return;
-    const url = await readFileDataURL(file);
+    const dataUrl = await readFileDataURL(file);
     const label = file.name.replace(/\.[^.]+$/, "").slice(0, 20) || "Logo";
     const id = `lib-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
     setDesign(prev => ({
       ...prev,
-      logoUrl: url,
-      logoLibrary: [...(prev.logoLibrary || []), { id, url, label, custom: true }],
+      logoUrl: dataUrl,
+      logoLibrary: [...(prev.logoLibrary || []), { id, url: dataUrl, label, custom: true }],
     }));
     showToast(`Logo "${label}" adicionado à biblioteca`);
+    // Upload to Storage and swap base64 → public URL everywhere it was set.
+    if (typeof window.uploadDataUrlToBucket === "function") {
+      try {
+        const url = await window.uploadDataUrlToBucket(dataUrl, `logo_${id}`);
+        if (url && url !== dataUrl) {
+          setDesign(prev => ({
+            ...prev,
+            logoUrl: prev.logoUrl === dataUrl ? url : prev.logoUrl,
+            logoLibrary: (prev.logoLibrary || []).map(l => l.id === id ? { ...l, url } : l),
+          }));
+        }
+      } catch (e) {
+        console.warn("Falha ao enviar logo ao Storage:", e);
+      }
+    }
   };
 
   const removeLogo = (id) => {
@@ -2928,15 +3227,25 @@ function DesignPanel({ store, onGoNext }) {
                     input.onchange = async (ev) => {
                       const file = ev.target.files[0];
                       if (!file) return;
-                      const url = await readFileDataURL(file);
+                      const dataUrl = await readFileDataURL(file);
                       setDesign(d => ({
                         ...d,
-                        profileAvatarUrl: url,
+                        profileAvatarUrl: dataUrl,
                         profileAvatarScale: 100,
                         profileAvatarPosX: 50,
                         profileAvatarPosY: 50,
                       }));
                       showToast("Foto de perfil atualizada");
+                      if (typeof window.uploadDataUrlToBucket === "function") {
+                        try {
+                          const url = await window.uploadDataUrlToBucket(dataUrl, "avatar");
+                          if (url && url !== dataUrl) {
+                            setDesign(d => ({ ...d, profileAvatarUrl: d.profileAvatarUrl === dataUrl ? url : d.profileAvatarUrl }));
+                          }
+                        } catch (e) {
+                          console.warn("Falha ao enviar avatar ao Storage:", e);
+                        }
+                      }
                     };
                     input.click();
                   }}>
@@ -3464,8 +3773,9 @@ function DesignPanel({ store, onGoNext }) {
 
 window.DesignPanel = DesignPanel;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-editor.jsx                                      ║
+// ║  panel-editor.jsx                                        ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -3563,7 +3873,7 @@ function PostsSidebar({ store }) {
             </div>
             <div className="post-tile-info">
               <div className="idx">{String(i + 1).padStart(2, "0")} {p.date && `· ${p.date}`}</div>
-              <div className="title">{p.title || "(sem título)"}</div>
+              <div className="title">{htmlToText(p.title) || "(sem título)"}</div>
               <div className="cat">{p.category || "—"}</div>
             </div>
             {posts.length > 1 &&
@@ -3584,7 +3894,7 @@ function PostsSidebar({ store }) {
 }
 
 function CanvasArea({ store }) {
-  const { selectedPost, design, updatePost } = store;
+  const { selectedPost, design, updatePost, showToast } = store;
   const fileRef = useRefE(null);
   const dragRef = useRefE({ down: false, startX: 0, startY: 0, origX: 50, origY: 50 });
 
@@ -3602,8 +3912,26 @@ function CanvasArea({ store }) {
 
   const handleImageUpload = async (file) => {
     if (!file) return;
-    const url = await readFileDataURL(file);
-    updatePost(selectedPost.id, { imageSrc: url });
+    const postId = selectedPost.id;
+    // 1) Show the picked image instantly (local base64) so the editor feels snappy.
+    const dataUrl = await readFileDataURL(file);
+    updatePost(postId, { imageSrc: dataUrl });
+    // 2) Upload to Supabase Storage and replace the base64 with the public URL,
+    //    so ONLY the URL is ever persisted — the image survives a reload.
+    if (typeof window.uploadDataUrlToBucket === "function") {
+      try {
+        showToast?.("Enviando imagem para a nuvem…");
+        const url = await window.uploadDataUrlToBucket(dataUrl, `post_${postId}`);
+        if (url && url !== dataUrl) {
+          updatePost(postId, { imageSrc: url });
+          showToast?.("Imagem salva na nuvem ☁");
+        }
+      } catch (e) {
+        console.warn("Falha ao enviar imagem ao Storage:", e);
+        // Keep the local base64 — autosave will retry the upload later.
+        showToast?.("Imagem salva localmente — reenvio automático em seguida");
+      }
+    }
   };
 
   const onCanvasClick = (e) => {
@@ -3733,7 +4061,7 @@ function EditorSidebar({ store }) {
 
   const generateCaption = async () => {
     setGenCap(true);
-    const prompt = `Escreva uma legenda de Instagram em português brasileiro para um post com este título: "${selectedPost.title}" e subtítulo: "${selectedPost.subtitle}". Categoria: ${selectedPost.category || "geral"}. Tom: direto, brasileiro, sem corporativês. Curto: 2 parágrafos curtos + uma chamada para ação no final. NÃO inclua hashtags. NÃO use emojis em excesso (no máximo 1-2). Retorne APENAS o texto da legenda.`;
+    const prompt = `Escreva uma legenda de Instagram em português brasileiro para um post com este título: "${htmlToText(selectedPost.title)}" e subtítulo: "${htmlToText(selectedPost.subtitle)}". Categoria: ${selectedPost.category || "geral"}. Tom: direto, brasileiro, sem corporativês. Curto: 2 parágrafos curtos + uma chamada para ação no final. NÃO inclua hashtags. NÃO use emojis em excesso (no máximo 1-2). Retorne APENAS o texto da legenda.`;
     const result = await callClaude(prompt);
     setGenCap(false);
     if (result) {
@@ -3746,7 +4074,7 @@ function EditorSidebar({ store }) {
 
   const generateHashtags = async () => {
     setGenTags(true);
-    const prompt = `Sugira de 8 a 12 hashtags relevantes para um post de Instagram com este título: "${selectedPost.title}". Categoria: ${selectedPost.category || "geral"}. Foque em hashtags brasileiras de marketing/branding/conteúdo, mix de tamanho (alguns nichados, alguns mais amplos). Retorne APENAS as hashtags, separadas por espaço, todas começando com #. Sem outros caracteres.`;
+    const prompt = `Sugira de 8 a 12 hashtags relevantes para um post de Instagram com este título: "${htmlToText(selectedPost.title)}". Categoria: ${selectedPost.category || "geral"}. Foque em hashtags brasileiras de marketing/branding/conteúdo, mix de tamanho (alguns nichados, alguns mais amplos). Retorne APENAS as hashtags, separadas por espaço, todas começando com #. Sem outros caracteres.`;
     const result = await callClaude(prompt);
     setGenTags(false);
     if (result) {
@@ -3763,7 +4091,7 @@ function EditorSidebar({ store }) {
       <h3 style={{
         fontFamily: "var(--font-sans)", fontSize: 18, fontWeight: 700,
         margin: "0 0 18px", letterSpacing: "-0.02em"
-      }}>{selectedPost.title || "(sem título)"}</h3>
+      }}>{htmlToText(selectedPost.title) || "(sem título)"}</h3>
 
       {/* Meta */}
       <CollapsibleSection title="Metadados" defaultOpen={true}>
@@ -4049,6 +4377,22 @@ function EditorSidebar({ store }) {
             </optgroup>
           )}
         </select>
+
+        <OverrideLabel name="Cor do subtítulo" active={has("subtitleColor")}
+        onReset={() => clearOverride("subtitleColor")} />
+        <div className="color-input-row" style={{ marginBottom: 4 }}>
+          <input type="color" value={eff.subtitleColor || eff.textColor || "#FAF4E4"}
+          onChange={(e) => setOverride("subtitleColor", e.target.value)} />
+          <input type="text" value={eff.subtitleColor || eff.textColor || ""}
+          onChange={(e) => setOverride("subtitleColor", e.target.value)} />
+          {has("subtitleColor") &&
+          <button className="btn btn-ghost btn-small" style={{ padding: "4px 8px", whiteSpace: "nowrap" }}
+          onClick={() => clearOverride("subtitleColor")}>herdar</button>
+          }
+        </div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: "var(--fg-muted)", margin: "2px 0 12px", letterSpacing: "0.03em" }}>
+          Por padrão herda a cor do texto. Defina para dar uma cor própria ao subtítulo.
+        </div>
 
         <OverrideLabel name="Fonte do título" active={has("titleFont")}
         onReset={() => clearOverride("titleFont")} />
@@ -4467,8 +4811,9 @@ function EditorPanel({ store }) {
 
 window.EditorPanel = EditorPanel;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-preview.jsx                                     ║
+// ║  panel-preview.jsx                                       ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -4610,7 +4955,7 @@ function FeedPost({ post, design, idx }) {
       </div>
       <div className="ig-post-caption">
         <span className="u">{design.username || "serafina.studio"}</span>
-        {post.title}{post.subtitle ? ` — ${post.subtitle}` : ""}
+        {htmlToText(post.title)}{post.subtitle ? ` — ${htmlToText(post.subtitle)}` : ""}
         {post.hashtags && (
           <span style={{ color: "#4a8cff", fontWeight: 400 }}>  {post.hashtags.split(/\s+/).slice(0,3).join(" ")}{post.hashtags.split(/\s+/).length > 3 ? " ..." : ""}</span>
         )}
@@ -4747,7 +5092,7 @@ function FullBleedCanvas({ post, design }) {
             const subStyle = {
               fontFamily: eff.subtitleFont,
               fontSize: u(subRef),
-              color: eff.textColor, opacity: 0.92,
+              color: eff.subtitleColor || eff.textColor, opacity: 0.92,
               lineHeight: linesMode ? undefined : 1.35,
               textAlign: layers.textAlign,
               width: "100%",
@@ -4758,11 +5103,11 @@ function FullBleedCanvas({ post, design }) {
               return (
                 <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: layers.align }}>
                   <div style={{ width: "100%", textAlign: layers.textAlign }}>
-                    <span style={titleStyle}>{post.title}</span>
+                    <span style={titleStyle} dangerouslySetInnerHTML={{ __html: post.title || "" }} />
                   </div>
                   {post.subtitle && (
                     <div style={{ width: "100%", textAlign: layers.textAlign, marginTop: u(gapRef) }}>
-                      <span style={subStyle}>{post.subtitle}</span>
+                      <span style={subStyle} dangerouslySetInnerHTML={{ __html: post.subtitle }} />
                     </div>
                   )}
                 </div>
@@ -4780,8 +5125,8 @@ function FullBleedCanvas({ post, design }) {
 
             return (
               <div style={wrapStyle}>
-                <div style={titleStyle}>{post.title}</div>
-                {post.subtitle && <div style={subStyle}>{post.subtitle}</div>}
+                <div style={titleStyle} dangerouslySetInnerHTML={{ __html: post.title || "" }} />
+                {post.subtitle && <div style={subStyle} dangerouslySetInnerHTML={{ __html: post.subtitle }} />}
               </div>
             );
           })()}
@@ -5140,8 +5485,9 @@ function PreviewPanel({ store, onJumpToEditor }) {
 window.PreviewPanel = PreviewPanel;
 window.FullBleedCanvas = FullBleedCanvas;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  export-posts.jsx                                      ║
+// ║  export-posts.jsx                                        ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -5263,7 +5609,7 @@ async function exportAllAsImages(posts, design, onProgress) {
       onProgress?.({ done: i, total: posts.length, current: post });
       const blob = await capturePost(container, post, design);
       const idx = String(i + 1).padStart(2, "0");
-      const slug = slugify(post.title) || slugify(post.category) || "post";
+      const slug = slugify(htmlToText(post.title)) || slugify(post.category) || "post";
       const filename = `${idx}-${slug}.png`;
       folder.file(filename, blob);
       singleBlobs.push({ blob, filename });
@@ -5421,7 +5767,7 @@ async function buildPPTX(posts, design, onProgress) {
     // 6) Título
     const titleSize = (eff.titleSize ?? 44) * 2.45;
     textRuns.push({
-      text: post.title || "",
+      text: htmlToText(post.title) || "",
       options: {
         fontSize: px2pt(titleSize),
         fontFace: mapFont(eff.titleFont),
@@ -5436,7 +5782,7 @@ async function buildPPTX(posts, design, onProgress) {
     if (post.subtitle) {
       const subSize = (eff.subtitleSize ?? 16) * 2.45;
       textRuns.push({
-        text: post.subtitle,
+        text: htmlToText(post.subtitle),
         options: {
           fontSize: px2pt(subSize),
           fontFace: mapFont(eff.subtitleFont),
@@ -5965,8 +6311,9 @@ function DownloadCodeButton({ store }) {
 
 window.DownloadCodeButton = DownloadCodeButton;
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  panel-auth.jsx                                        ║
+// ║  panel-auth.jsx                                          ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -6063,8 +6410,9 @@ function LoginScreen({ auth }) {
 
 Object.assign(window, { LoginScreen });
 
+
 // ╔══════════════════════════════════════════════════════════╗
-// ║  main.jsx                                              ║
+// ║  main.jsx                                                ║
 // ╚══════════════════════════════════════════════════════════╝
 
 // ============================================================
@@ -6159,6 +6507,16 @@ function App() {
   }
   if (!auth.session) {
     return <LoginScreen auth={auth} />;
+  }
+
+  // Cloud-first: wait for the initial Supabase fetch before showing the app.
+  if (sync.enabled && sync.booting) {
+    return (
+      <div className="auth-splash">
+        <div className="auth-splash-spinner" />
+        <span>Carregando dados…</span>
+      </div>
+    );
   }
 
   const activePlan = store.savedPlans.find(p => p.id === store.activePlanId);
