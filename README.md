@@ -1,121 +1,68 @@
-# Gerador de Planejamento · Serafina
+# Gerador de Planejamento — Serafina
 
-App web client-side (React 18) para montar planejamentos de conteúdo: upload do briefing, design system, edição dos posts, preview e exportação.
+Ferramenta de geração e edição de posts de Instagram a partir de planejamentos em .txt.
 
-> **Importante:** este projeto é 100% estático. Não há etapa de build — o React e o JSX são carregados e transpilados no navegador via Babel Standalone. Isso significa **deploy sem configuração** (zero build), mas a transpilação acontece no cliente (primeiro carregamento um pouco mais lento). Veja [Otimização para produção](#otimização-para-produção-opcional) se quiser remover o Babel do runtime.
+## Como rodar localmente
 
-## Estrutura dos arquivos
-
-```
-.
-├── index.html      # Ponto de entrada — carrega React, Babel e App.jsx
-├── App.jsx         # Todo o código React (store + painéis + canvas), em ordem de carga
-├── styles.css      # Folha de estilos completa
-├── vercel.json     # Config estática do Vercel
-└── README.md
-```
-
-`App.jsx` é a concatenação, **na ordem correta de carregamento**, dos módulos originais:
-`store → supabase-sync → auth → canvas → panel-plans → panel-upload → panel-design → panel-editor → panel-preview → export-posts → panel-auth → main`.
-Todos compartilham escopo global (`window`), por isso a ordem importa.
-
-## Acesso (login unificado)
-
-O app é protegido por um **login único da equipe** (sem cadastro, sem banco):
-
-- Usuário: `serafina`
-- Senha: `serafina2024`
-
-A sessão fica no `localStorage` e expira após 8 horas. Para trocar as credenciais, edite o objeto `CREDENCIAIS` na seção `auth.jsx` dentro do `App.jsx`.
-
-## Rodar localmente
-
-Como tudo é estático, basta servir a pasta com qualquer servidor HTTP (não abra via `file://` — o `fetch` do `App.jsx` precisa de HTTP):
+Por usar Babel in-browser, precisa de um servidor HTTP simples (não abre direto pelo file://):
 
 ```bash
-# Opção 1: Python
-python3 -m http.server 5173
+# Opção 1 — Python
+python3 -m http.server 8000
 
-# Opção 2: Node (npx)
+# Opção 2 — Node
 npx serve .
 
-# depois abra http://localhost:5173
+# Opção 3 — qualquer servidor estático
 ```
 
-## Deploy no GitHub
+Depois abra http://localhost:8000/Gerador%20de%20Planejamento.html
 
-```bash
-cd export                 # ou a pasta onde estão estes arquivos
-git init
-git add .
-git commit -m "Gerador de Planejamento — versão estática"
-git branch -M main
-git remote add origin https://github.com/SEU_USUARIO/SEU_REPO.git
-git push -u origin main
-```
+## Estrutura
 
-## Deploy no Vercel
+- `Gerador de Planejamento.html` — entrypoint
+- `app.css` — todos os estilos
+- `main.jsx` — App root + tabs
+- `store.jsx` — state management, parsing, helpers
+- `canvas.jsx` — renderer do post canvas (4:5)
+- `panel-*.jsx` — cada aba (Arquivo, Upload, Design, Editor, Preview)
+- `export-posts.jsx` — exportação PNG/PPTX
+- `design-system/` — UI kit Serafina (cores, fontes, logos)
 
-**Pela interface (mais simples):**
-1. Acesse [vercel.com/new](https://vercel.com/new) e importe o repositório do GitHub.
-2. Em **Framework Preset**, escolha **Other**.
-3. Deixe **Build Command** e **Output Directory** em branco (é site estático).
-4. Clique em **Deploy**.
+## Stack
 
-**Pela CLI:**
-```bash
-npm i -g vercel
-vercel          # preview
-vercel --prod   # produção
-```
+- React 18 (via CDN, sem build)
+- Babel standalone (transpila JSX em runtime)
+- html2canvas + JSZip + PptxGenJS (carregados sob demanda)
+- Persistência: window.storage (cross-device) ou localStorage
 
-## Otimização para produção (opcional)
+Gerado em 2026-06-09T00:22:45.059Z.
 
-O setup atual prioriza simplicidade. Para um app mais rápido em produção, considere migrar para um bundler (Vite):
 
-1. `npm create vite@latest` (template React).
-2. Mova o conteúdo de `App.jsx` para `src/` (separando de novo em componentes, se quiser).
-3. Importe `styles.css` no entry e troque o React/Babel via CDN por dependências locais.
-4. No Vercel, use Build Command `npm run build` e Output Directory `dist`.
+## Arquivos faltantes
 
-Isso remove o Babel do navegador e gera um bundle minificado.
-
-## Supabase (persistência na nuvem)
-
-A ferramenta sincroniza **clientes, planejamentos, posts e design system** com o Supabase, além de manter o estado local (funciona offline e faz fallback para `localStorage`).
-
-- Credenciais e mapeamento de tabelas ficam em `App.jsx` (seção `supabase-sync.jsx`).
-- O cliente JS do Supabase é carregado via CDN no `index.html`.
-- O badge **"Nuvem"** no topo mostra o status (`Salvando…` / `Salvo ✓ HH:MM` / `Erro ao salvar ✗`) e lista os clientes salvos na nuvem — clicar em um cliente carrega posts + design dele.
-- **Auto-save automático:** qualquer edição é salva sozinha (debounce 2s). Se ainda não houver um plano na nuvem, ele é criado automaticamente (cliente = cliente ativo ou nome da marca). Não é preciso clicar em “salvar”.
-- **Ao abrir o app:** uma tela de “Carregando dados…” busca os clientes do Supabase e carrega automaticamente o último cliente ativo (posts + design) — sem depender do `localStorage`.
-
-### ⚠️ Coluna `extras` (recomendado — estilos avançados)
-
-A tabela `posts` tem colunas fixas para os campos principais. Estilos avançados (entrelinha, cor do subtítulo, caixa de texto, elemento livre, cor por palavra etc.) são gravados numa coluna **`extras` (jsonb)** quando ela existe. Sem ela, esses ajustes finos voltam ao padrão ao recarregar (o conteúdo principal persiste normalmente). Para ativar a fidelidade total, rode uma vez no **SQL Editor**:
-
-```sql
-ALTER TABLE posts ADD COLUMN IF NOT EXISTS extras jsonb;
-```
-
-O app detecta a coluna automaticamente — com ou sem ela o salvamento nunca quebra.
-
-### ⚠️ Bucket de imagens (passo manual obrigatório)
-
-As imagens dos posts são enviadas para o **Supabase Storage**, bucket `planflow-imagens`. A chave *publishable* **não tem permissão para criar buckets nem políticas**, então faça isso uma vez no painel:
-
-1. Supabase → **Storage** → **New bucket**.
-2. Nome exato: `planflow-imagens` · marque **Public bucket** · **Save**.
-3. Em **SQL Editor**, crie as políticas de upload para o papel `anon` (o app usa a chave pública, sem login de usuário no Supabase):
-
-```sql
-create policy "anon upload planflow"
-  on storage.objects for insert to anon
-  with check ( bucket_id = 'planflow-imagens' );
-
-create policy "anon update planflow"
-  on storage.objects for update to anon
-  using ( bucket_id = 'planflow-imagens' );
-```
-
-Enquanto o bucket não existir, os posts ainda salvam normalmente (texto + layout + design system) e as imagens ficam guardadas no próprio banco como fallback (base64), então **nada some ao recarregar** — criar o bucket apenas migra as imagens para um armazenamento mais leve e o badge deixa de avisar.
+- Gerador de Planejamento.html
+- app.css
+- main.jsx
+- store.jsx
+- canvas.jsx
+- panel-plans.jsx
+- panel-upload.jsx
+- panel-design.jsx
+- panel-editor.jsx
+- panel-preview.jsx
+- export-posts.jsx
+- design-system/colors_and_type.css
+- design-system/assets/logo-principal-cosmic-latte.png
+- design-system/assets/logo-principal-night.png
+- design-system/assets/logo-symbol-cosmic-latte.png
+- design-system/assets/logo-symbol-infinity-blue.png
+- design-system/assets/logo-symbol-night.png
+- design-system/fonts/Apercu-Light.otf
+- design-system/fonts/Apercu-Regular.otf
+- design-system/fonts/Apercu-Italic.otf
+- design-system/fonts/Apercu-Medium.otf
+- design-system/fonts/Apercu-Bold.otf
+- design-system/fonts/Apercu-Mono.otf
+- design-system/fonts/Authentive.otf
+- design-system/fonts/HankenGrotesk-VariableFont_wght.ttf

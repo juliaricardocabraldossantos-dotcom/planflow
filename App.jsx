@@ -4994,12 +4994,23 @@ function BrandAvatar({ design, fallbackPadding = 4, fallbackText = "S" }) {
 
 // Renders a post at the size of its container (100%/100%)
 // Uses container queries to scale text proportionally to container width.
-function FullBleedCanvas({ post, design }) {
+function FullBleedCanvas({ post, design, renderWidth }) {
   const layers = computeLayerStyles(post, design);
   const eff = layers.eff;
-  // Reference design is 1080px wide. We scale everything via container queries:
-  // 100cqw = container width. So scale unit = (1 / 1080) * 100cqw.
-  const u = (n) => `calc(${n} * 100cqw / 1080)`;
+  // Reference design is 1080px wide. On screen we scale everything via container
+  // queries (100cqw = container width), so the preview is responsive.
+  //
+  // For EXPORT / mirroring we pass an explicit `renderWidth` (e.g. 1080). That
+  // switches every dimension to ABSOLUTE px computed from the reference width —
+  // no `cqw`, no container query. This is required because html2canvas (the
+  // PNG/export engine) cannot resolve container-query units, so without this the
+  // captured layout collapses (text out of place, elements misaligned). Fixed px
+  // also makes the result identical regardless of window size, browser zoom, or
+  // fullscreen presentation.
+  const fixed = typeof renderWidth === "number" && renderWidth > 0;
+  const u = fixed
+    ? (n) => `${(n * renderWidth) / 1080}px`
+    : (n) => `calc(${n} * 100cqw / 1080)`;
   // Date corner positions
   const dateInset = u(36);
   const dp = eff.datePosition || "top-left";
@@ -5027,7 +5038,7 @@ function FullBleedCanvas({ post, design }) {
     <div style={{
       position: "absolute", inset: 0, overflow: "hidden",
       borderRadius: 0,
-      containerType: "inline-size",
+      ...(fixed ? null : { containerType: "inline-size" }),
     }}>
       <div style={{ position: "absolute", inset: 0, ...layers.bgImage, backgroundColor: layers.bgImage.backgroundColor }} />
       <div style={{ position: "absolute", inset: 0, ...layers.overlay }} />
@@ -5534,7 +5545,7 @@ async function capturePost(container, post, design) {
     container.__reactRoot = root;
     root.render(
       <div style={{ width: 1080, height: 1350, position: "relative", overflow: "hidden", background: design.primaryColor }}>
-        <window.FullBleedCanvas post={post} design={design} />
+        <window.FullBleedCanvas post={post} design={design} renderWidth={1080} />
       </div>
     );
 
